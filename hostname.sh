@@ -1,9 +1,6 @@
 #!/bin/bash
 #===============================================================
 # CrowdStrike 部署前主机名统一设置工具  —  macOS 强化版
-# 1. 支持双击自动打开终端
-# 2. 三处 hostname 全部校验，任一失败即回滚
-# 3. Webhook 报告依旧保留
 #===============================================================
 if [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
     osascript -e 'tell application "Terminal" to do script "'"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"'"'
