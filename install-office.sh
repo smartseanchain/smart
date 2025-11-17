@@ -29,7 +29,7 @@ rm lark.dmg && echo "OK" || echo "ERROR"
 
 # 4. Google Chrome
 echo -n "Chrome ... "
-curl -fsSL -o chrome.dmg https://smart-1386797427.cos.ap-guangzhou.myqcloud.com/googlechrome.dmg && \
+curl -fsSL -o chrome.dmg https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg && \
 hdiutil attach -quiet -nobrowse chrome.dmg && \
 cp -R "/Volumes/Chrome*/Google Chrome.app" /Applications/ && \
 hdiutil detach -quiet /Volumes/Chrome* && \
