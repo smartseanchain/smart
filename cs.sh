@@ -22,10 +22,10 @@ readonly NC='\033[0m' # No Color
 readonly SCRIPT_VERSION="3.0"
 readonly LOG_FILE="/var/log/crowdstrike_install.log"
 readonly TEMP_DIR="/tmp/cs_install_$$"
-readonly CROWDSTRIKE_PKG_URL="https://your-domain.com/downloads/CrowdStrike.pkg"
+readonly CROWDSTRIKE_PKG_URL="https://s3-public-test1.s3.ap-northeast-1.amazonaws.com/crowdstrike/FalconSensorMacOS.MaverickGyr.pkg"
 readonly FALCON_APP_PATH="/Applications/Falcon.app"
 readonly FALCON_CTL_PATH="${FALCON_APP_PATH}/Contents/Resources/falconctl"
-readonly CCID="YOUR-FIXED-CCID-HERE"
+readonly CCID="E3E08A20CAE84445821F3AC16D1C2B53-B5"
 readonly FALCON_SERVICE_PATH="/Library/LaunchDaemons/com.crowdstrike.falcond.plist"
 
 ################################################################################
