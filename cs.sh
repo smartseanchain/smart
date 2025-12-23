@@ -1,9 +1,10 @@
 #!/bin/bash
 
 ################################################################################
-# CrowdStrike Installation Script for macOS
-# Version: 2.0
-# Description: Optimized installation with token validation and auto-configuration
+# CrowdStrike Falcon Agent Automated Installation Script for macOS
+# Version: 3.0
+# Description: One-click automated installation with fixed URL, auto CCID config,
+#              interactive token input, and automated configuration
 # Author: SmartSeanChain
 # Date: 2025-12-23
 ################################################################################
@@ -17,17 +18,20 @@ readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
 readonly NC='\033[0m' # No Color
 
-# Configuration
-readonly SCRIPT_VERSION="2.0"
+# Configuration - FIXED VALUES
+readonly SCRIPT_VERSION="3.0"
 readonly LOG_FILE="/var/log/crowdstrike_install.log"
 readonly TEMP_DIR="/tmp/cs_install_$$"
-readonly CROWDSTRIKE_PKG_NAME="CrowdStrike"
+readonly CROWDSTRIKE_PKG_URL="https://your-domain.com/downloads/CrowdStrike.pkg"
+readonly FALCON_APP_PATH="/Applications/Falcon.app"
+readonly FALCON_CTL_PATH="${FALCON_APP_PATH}/Contents/Resources/falconctl"
+readonly CCID="YOUR-FIXED-CCID-HERE"
+readonly FALCON_SERVICE_PATH="/Library/LaunchDaemons/com.crowdstrike.falcond.plist"
 
 ################################################################################
 # Utility Functions
 ################################################################################
 
-# Log function with timestamp
 log() {
     local level="$1"
     shift
@@ -36,7 +40,6 @@ log() {
     echo "[${timestamp}] [${level}] ${message}" | tee -a "${LOG_FILE}"
 }
 
-# Print colored output
 print_status() {
     echo -e "${BLUE}[INFO]${NC} $@"
 }
@@ -53,11 +56,14 @@ print_warning() {
     echo -e "${YELLOW}[!]${NC} $@"
 }
 
+print_input() {
+    echo -e "${BLUE}[INPUT]${NC} $@"
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        print_error "This script must be run as root"
-        log "ERROR" "Script executed without root privileges"
+        print_error "This script must be run as root (use: sudo ./cs.sh)"
         exit 1
     fi
 }
@@ -67,11 +73,12 @@ cleanup() {
     local exit_code=$?
     if [[ -d "${TEMP_DIR}" ]]; then
         rm -rf "${TEMP_DIR}"
+        log "INFO" "Temporary directory cleaned up"
     fi
     if [[ ${exit_code} -eq 0 ]]; then
-        log "INFO" "Installation completed successfully"
+        log "INFO" "=== CrowdStrike Installation Completed Successfully ==="
     else
-        log "ERROR" "Installation failed with exit code ${exit_code}"
+        log "ERROR" "=== Installation Failed with Exit Code ${exit_code} ==="
     fi
     return ${exit_code}
 }
@@ -79,31 +86,34 @@ cleanup() {
 trap cleanup EXIT
 
 ################################################################################
-# Validation Functions
+# Input & Validation Functions
 ################################################################################
 
-# Validate token format
-validate_token() {
-    local token="$1"
+# Interactive token input with validation
+get_and_validate_token() {
+    local token=""
+    local valid=0
     
-    if [[ -z "${token}" ]]; then
-        print_error "Token cannot be empty"
-        return 1
-    fi
+    while [[ ${valid} -eq 0 ]]; do
+        print_input "Enter CrowdStrike Provisioning Token (8 digits):"
+        read -r -p "Token: " token
+        
+        # Validate: exactly 8 digits
+        if [[ -z "${token}" ]]; then
+            print_error "Token cannot be empty"
+            continue
+        fi
+        
+        if ! [[ "${token}" =~ ^[0-9]{8}$ ]]; then
+            print_error "Token must be exactly 8 digits. You entered: ${token}"
+            continue
+        fi
+        
+        print_success "Token validated successfully: ${token:0:4}****"
+        valid=1
+    done
     
-    # Token should be at least 32 characters (adjust based on your requirements)
-    if [[ ${#token} -lt 32 ]]; then
-        print_error "Token is too short (minimum 32 characters)"
-        return 1
-    fi
-    
-    # Check if token contains only valid characters (alphanumeric and hyphens)
-    if ! [[ "${token}" =~ ^[a-zA-Z0-9-]+$ ]]; then
-        print_error "Token contains invalid characters"
-        return 1
-    fi
-    
-    return 0
+    echo "${token}"
 }
 
 # Validate macOS version
@@ -111,7 +121,7 @@ validate_macos_version() {
     local min_version="10.13"
     local current_version=$(sw_vers -productVersion)
     
-    print_status "macOS version: ${current_version}"
+    print_status "Detected macOS version: ${current_version}"
     
     if ! [[ "${current_version}" > "${min_version}" ]] && ! [[ "${current_version}" == "${min_version}" ]]; then
         print_error "macOS version ${current_version} is not supported (minimum required: ${min_version})"
@@ -119,6 +129,7 @@ validate_macos_version() {
         return 1
     fi
     
+    print_success "macOS version compatible"
     return 0
 }
 
@@ -126,7 +137,9 @@ validate_macos_version() {
 check_dependencies() {
     local missing_deps=()
     
-    for cmd in curl installer pkgutil; do
+    print_status "Checking system dependencies..."
+    
+    for cmd in curl installer pkgutil launchctl; do
         if ! command -v "${cmd}" &> /dev/null; then
             missing_deps+=("${cmd}")
         fi
@@ -138,7 +151,7 @@ check_dependencies() {
         return 1
     fi
     
-    print_success "All required dependencies are available"
+    print_success "All required dependencies available"
     return 0
 }
 
@@ -152,7 +165,7 @@ check_crowdstrike_installed() {
 }
 
 ################################################################################
-# Installation Functions
+# Download & Installation Functions
 ################################################################################
 
 # Create temporary directory
@@ -161,31 +174,35 @@ setup_temp_directory() {
         print_error "Failed to create temporary directory"
         return 1
     fi
-    print_status "Temporary directory created: ${TEMP_DIR}"
+    print_status "Temporary directory: ${TEMP_DIR}"
+    log "INFO" "Temporary directory created"
     return 0
 }
 
 # Download CrowdStrike installer
 download_installer() {
-    local download_url="$1"
     local output_file="${TEMP_DIR}/CrowdStrike.pkg"
     
-    print_status "Downloading CrowdStrike installer..."
-    log "INFO" "Download URL: ${download_url}"
+    print_status "Downloading CrowdStrike Falcon Agent..."
+    log "INFO" "Download URL: ${CROWDSTRIKE_PKG_URL}"
     
-    if ! curl -fSL --max-time 300 -o "${output_file}" "${download_url}"; then
-        print_error "Failed to download CrowdStrike installer"
-        log "ERROR" "Download failed from: ${download_url}"
+    if ! curl -fSL --max-time 600 --progress-bar -o "${output_file}" "${CROWDSTRIKE_PKG_URL}"; then
+        print_error "Failed to download CrowdStrike installer from: ${CROWDSTRIKE_PKG_URL}"
+        log "ERROR" "Download failed"
         return 1
     fi
     
-    # Verify file was downloaded
+    # Verify file exists and is not empty
     if [[ ! -f "${output_file}" ]] || [[ ! -s "${output_file}" ]]; then
         print_error "Downloaded file is empty or does not exist"
+        log "ERROR" "Downloaded file validation failed"
         return 1
     fi
     
-    print_success "Installer downloaded successfully"
+    local file_size=$(du -h "${output_file}" | cut -f1)
+    print_success "Installer downloaded successfully (${file_size})"
+    log "INFO" "Installer downloaded: ${output_file}"
+    
     echo "${output_file}"
     return 0
 }
@@ -196,216 +213,236 @@ verify_package() {
     
     print_status "Verifying package integrity..."
     
-    if ! pkgutil --check-signature "${pkg_path}" &> /dev/null; then
-        print_warning "Package signature verification failed"
-        log "WARNING" "Package signature check failed for: ${pkg_path}"
-        # Continue anyway as signature check might not be critical
-    else
+    if pkgutil --check-signature "${pkg_path}" &> /dev/null; then
         print_success "Package signature verified"
+        log "INFO" "Package signature verification passed"
+    else
+        print_warning "Package signature verification failed (continuing anyway)"
+        log "WARNING" "Package signature verification failed"
     fi
     
     return 0
 }
 
-# Install CrowdStrike
+# Install CrowdStrike package
 install_crowdstrike() {
     local pkg_path="$1"
-    local falcon_client_id="$2"
-    local falcon_client_secret="$3"
     
-    print_status "Installing CrowdStrike..."
-    log "INFO" "Starting CrowdStrike installation from: ${pkg_path}"
+    print_status "Installing CrowdStrike Falcon Agent..."
+    log "INFO" "Starting installation from: ${pkg_path}"
     
-    # Install the package
-    if ! installer -pkg "${pkg_path}" -target / -verboseR; then
+    if ! installer -pkg "${pkg_path}" -target / -verboseR 2>&1 | tee -a "${LOG_FILE}"; then
         print_error "Installation failed"
         log "ERROR" "CrowdStrike installation failed"
         return 1
     fi
     
-    print_success "CrowdStrike installed successfully"
-    return 0
+    # Verify installation
+    sleep 2
+    if [[ -d "${FALCON_APP_PATH}" ]]; then
+        print_success "CrowdStrike Falcon Agent installed successfully"
+        log "INFO" "Installation verified - Falcon.app found"
+        return 0
+    else
+        print_error "Installation verification failed - Falcon.app not found"
+        log "ERROR" "Post-installation verification failed"
+        return 1
+    fi
 }
 
-# Configure CrowdStrike with credentials
+################################################################################
+# Configuration Functions
+################################################################################
+
+# Configure CrowdStrike with CCID and Token
 configure_crowdstrike() {
-    local falcon_client_id="$1"
-    local falcon_client_secret="$2"
+    local falcon_token="$1"
     
-    print_status "Configuring CrowdStrike with credentials..."
+    print_status "Configuring CrowdStrike Falcon Agent..."
+    log "INFO" "Starting CrowdStrike configuration with CCID: ${CCID}"
     
-    # Check for CrowdStrike CLI tool
-    local cs_cli_path="/Applications/Falcon.app/Contents/Resources/falconctl"
-    
-    if [[ ! -f "${cs_cli_path}" ]]; then
-        print_warning "CrowdStrike CLI tool not found at expected location"
-        log "WARNING" "CrowdStrike CLI not found at: ${cs_cli_path}"
-        return 0
+    # Verify falconctl exists
+    if [[ ! -f "${FALCON_CTL_PATH}" ]]; then
+        print_error "CrowdStrike CLI tool (falconctl) not found at: ${FALCON_CTL_PATH}"
+        log "ERROR" "falconctl not found"
+        return 1
     fi
     
-    # Configure with client ID and secret
-    print_status "Setting CrowdStrike credentials..."
-    
-    if ! "${cs_cli_path}" -s --cid="${falcon_client_id}" --provisioning-token="${falcon_client_secret}" 2>&1 | tee -a "${LOG_FILE}"; then
-        print_warning "Configuration may have encountered issues"
-        log "WARNING" "CrowdStrike configuration completed with warnings"
+    # Step 1: Set Customer ID (CCID)
+    print_status "Setting Customer ID (CCID)..."
+    if ! "${FALCON_CTL_PATH}" -s --cid="${CCID}" 2>&1 | tee -a "${LOG_FILE}"; then
+        print_warning "CCID configuration encountered issues"
+        log "WARNING" "CCID configuration warning"
     else
-        print_success "CrowdStrike configured successfully"
+        print_success "CCID configured: ${CCID}"
+        log "INFO" "CCID configured successfully"
+    fi
+    
+    sleep 1
+    
+    # Step 2: Set Provisioning Token
+    print_status "Setting Provisioning Token..."
+    if ! "${FALCON_CTL_PATH}" -s --provisioning-token="${falcon_token}" 2>&1 | tee -a "${LOG_FILE}"; then
+        print_warning "Token configuration encountered issues"
+        log "WARNING" "Token configuration warning"
+    else
+        print_success "Provisioning Token configured"
+        log "INFO" "Token configured successfully"
+    fi
+    
+    sleep 1
+    
+    # Step 3: Enable Falcon service to auto-start
+    print_status "Enabling CrowdStrike Falcon service..."
+    if [[ -f "${FALCON_SERVICE_PATH}" ]]; then
+        if ! launchctl load -w "${FALCON_SERVICE_PATH}" 2>&1 | tee -a "${LOG_FILE}"; then
+            print_warning "Service startup configuration encountered issues"
+            log "WARNING" "Service startup warning"
+        else
+            print_success "Falcon service enabled for auto-start"
+            log "INFO" "Falcon service enabled"
+        fi
+    fi
+    
+    sleep 2
+    
+    # Step 4: Start the service
+    print_status "Starting CrowdStrike Falcon service..."
+    if ! "${FALCON_CTL_PATH}" -s 2>&1 | tee -a "${LOG_FILE}"; then
+        print_warning "Service start encountered issues"
+        log "WARNING" "Service start warning"
+    else
+        print_success "CrowdStrike Falcon service started"
+        log "INFO" "Falcon service started successfully"
     fi
     
     return 0
 }
 
-# Verify installation
-verify_installation() {
-    print_status "Verifying CrowdStrike installation..."
+# Verify service is running
+verify_service_running() {
+    print_status "Verifying CrowdStrike Falcon service status..."
     
-    # Check if CrowdStrike is running
-    if pgrep -f "falcond" &> /dev/null; then
-        print_success "CrowdStrike daemon (falcond) is running"
-        log "INFO" "CrowdStrike service verified as running"
-        return 0
-    else
-        print_warning "CrowdStrike daemon (falcond) is not running"
-        print_status "Attempting to start CrowdStrike service..."
-        
-        if [[ -f "/Applications/Falcon.app/Contents/Resources/falconctl" ]]; then
-            /Applications/Falcon.app/Contents/Resources/falconctl -s &> /dev/null || true
+    sleep 3
+    
+    # Check if falcond process is running
+    local max_attempts=10
+    local attempt=0
+    
+    while [[ ${attempt} -lt ${max_attempts} ]]; do
+        if pgrep -f "falcond" > /dev/null; then
+            print_success "CrowdStrike Falcon daemon (falcond) is running"
+            log "INFO" "Falcon service verification successful"
+            return 0
         fi
         
-        return 0
-    fi
-}
-
-################################################################################
-# Main Functions
-################################################################################
-
-# Display usage information
-usage() {
-    cat << EOF
-Usage: $0 -t TOKEN [-u URL] [-i CLIENT_ID] [-s CLIENT_SECRET]
-
-CrowdStrike Installation Script for macOS
-
-Options:
-    -t TOKEN              Provisioning token (required, minimum 32 characters)
-    -u URL                Download URL for CrowdStrike installer (optional)
-    -i CLIENT_ID          Falcon API Client ID (optional)
-    -s CLIENT_SECRET      Falcon API Client Secret (optional)
-    -h                    Display this help message
-    -v                    Display script version
-
-Examples:
-    $0 -t "your-provisioning-token-here"
-    $0 -t "token" -u "https://example.com/CrowdStrike.pkg" -i "client-id" -s "client-secret"
-
-EOF
-}
-
-# Display version
-display_version() {
-    echo "CrowdStrike Installation Script v${SCRIPT_VERSION}"
-}
-
-# Parse command line arguments
-parse_arguments() {
-    local token=""
-    local download_url=""
-    local client_id=""
-    local client_secret=""
-    
-    while getopts "t:u:i:s:hv" opt; do
-        case ${opt} in
-            t)
-                token="${OPTARG}"
-                ;;
-            u)
-                download_url="${OPTARG}"
-                ;;
-            i)
-                client_id="${OPTARG}"
-                ;;
-            s)
-                client_secret="${OPTARG}"
-                ;;
-            h)
-                usage
-                exit 0
-                ;;
-            v)
-                display_version
-                exit 0
-                ;;
-            *)
-                print_error "Invalid option: -${OPTARG}"
-                usage
-                exit 1
-                ;;
-        esac
+        print_status "Waiting for Falcon service to start... (${attempt}/${max_attempts})"
+        sleep 2
+        ((attempt++))
     done
     
-    # Validate required token parameter
-    if [[ -z "${token}" ]]; then
-        print_error "Provisioning token is required"
-        usage
-        exit 1
-    fi
-    
-    if ! validate_token "${token}"; then
-        exit 1
-    fi
-    
-    echo "${token}|${download_url}|${client_id}|${client_secret}"
+    print_warning "CrowdStrike Falcon daemon is not yet running - service may start shortly"
+    log "WARNING" "Falcon daemon not running after verification attempts"
+    return 0
 }
 
-# Main installation flow
+# Display service status
+display_service_status() {
+    print_status "Checking CrowdStrike service details..."
+    
+    if [[ -f "${FALCON_CTL_PATH}" ]]; then
+        echo ""
+        print_status "--- Falcon Service Status ---"
+        "${FALCON_CTL_PATH}" -q 2>&1 | tee -a "${LOG_FILE}" || true
+        echo ""
+    fi
+}
+
+################################################################################
+# Main Installation Flow
+################################################################################
+
 main() {
-    print_status "CrowdStrike Installation Script v${SCRIPT_VERSION}"
-    print_status "Current Date: 2025-12-23 06:50:40 UTC"
+    print_status "========================================="
+    print_status "CrowdStrike Falcon Agent Installation v${SCRIPT_VERSION}"
+    print_status "========================================="
+    echo ""
     
     log "INFO" "=== CrowdStrike Installation Started ==="
+    log "INFO" "Script Version: ${SCRIPT_VERSION}"
+    log "INFO" "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
     
-    # Parse arguments
-    local args=$(parse_arguments "$@")
-    IFS='|' read -r token download_url client_id client_secret <<< "${args}"
+    # Pre-installation checks
+    print_status "Performing pre-installation checks..."
+    echo ""
     
-    # Validation checks
     check_root || exit 1
     validate_macos_version || exit 1
     check_dependencies || exit 1
     
+    echo ""
+    
     # Check if already installed
     if check_crowdstrike_installed; then
-        read -p "CrowdStrike appears to be installed. Continue? (y/n): " -n 1 -r
+        print_warning "CrowdStrike may already be installed"
+        read -p "Continue with installation? (y/n): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            print_status "Installation cancelled"
+            print_status "Installation cancelled by user"
+            log "INFO" "Installation cancelled"
             exit 0
         fi
     fi
     
-    # Setup and installation
+    echo ""
+    
+    # Get token from user
+    print_status "Token input required"
+    echo ""
+    local falcon_token=$(get_and_validate_token)
+    echo ""
+    
+    # Setup installation
+    print_status "Setting up installation environment..."
     setup_temp_directory || exit 1
+    echo ""
     
-    # Download installer if URL provided
-    if [[ -n "${download_url}" ]]; then
-        local pkg_file
-        pkg_file=$(download_installer "${download_url}") || exit 1
-        verify_package "${pkg_file}" || exit 1
-        install_crowdstrike "${pkg_file}" "${client_id}" "${client_secret}" || exit 1
-    fi
+    # Download
+    print_status "Downloading installation package..."
+    local pkg_file
+    pkg_file=$(download_installer) || exit 1
+    echo ""
     
-    # Configure if credentials provided
-    if [[ -n "${client_id}" ]] && [[ -n "${client_secret}" ]]; then
-        configure_crowdstrike "${client_id}" "${client_secret}" || exit 1
-    fi
+    # Verify
+    verify_package "${pkg_file}" || exit 1
+    echo ""
     
-    # Verify installation
-    verify_installation
+    # Install
+    print_status "Installing CrowdStrike Falcon Agent..."
+    echo ""
+    install_crowdstrike "${pkg_file}" || exit 1
+    echo ""
     
-    print_success "CrowdStrike installation and configuration completed!"
+    # Configure
+    print_status "Configuring CrowdStrike Falcon Agent..."
+    echo ""
+    configure_crowdstrike "${falcon_token}" || exit 1
+    echo ""
+    
+    # Verify service
+    print_status "Verifying installation..."
+    echo ""
+    verify_service_running || exit 1
+    display_service_status
+    echo ""
+    
+    # Success
+    print_success "========================================="
+    print_success "Installation and Configuration Completed!"
+    print_success "========================================="
     print_status "Log file: ${LOG_FILE}"
+    echo ""
+    log "INFO" "Installation completed successfully"
 }
 
 ################################################################################
