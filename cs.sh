@@ -2,7 +2,7 @@
 
 # 定义变量
 DOWNLOAD_URL="https://s3-public-test1.s3.ap-northeast-1.amazonaws.com/crowdstrike/FalconSensorMacOS.MaverickGyr.pkg"
-CCID="41c331367246448dbeacb1621a86b946"
+CCID="E3E08A20CAE84445821F3AC16D1C2B53-B5"
 INSTALLER_PATH="/tmp/FalconSensorMacOS.MaverickGyr.pkg"
 
 # 检查是否具有管理员权限
